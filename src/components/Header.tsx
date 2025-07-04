@@ -1,14 +1,24 @@
 import React from 'react';
 import { motion } from 'framer-motion';
-import { Moon, Sun, Zap, AlertCircle, CheckCircle, Server } from 'lucide-react';
+import { Moon, Sun, Zap, AlertCircle, CheckCircle, Server, User, LogOut, LogIn } from 'lucide-react';
 
 interface HeaderProps {
   theme: 'light' | 'dark';
   onToggleTheme: () => void;
   systemHealth?: any;
+  user?: any;
+  onLogin?: () => void;
+  onLogout?: () => void;
 }
 
-const Header: React.FC<HeaderProps> = ({ theme, onToggleTheme, systemHealth }) => {
+const Header: React.FC<HeaderProps> = ({ 
+  theme, 
+  onToggleTheme, 
+  systemHealth, 
+  user, 
+  onLogin, 
+  onLogout 
+}) => {
   const getHealthStatus = () => {
     if (!systemHealth) return { icon: AlertCircle, text: 'Checking...', color: 'text-gray-500' };
     
@@ -68,12 +78,12 @@ const Header: React.FC<HeaderProps> = ({ theme, onToggleTheme, systemHealth }) =
               <p className={`text-sm ${
                 theme === 'dark' ? 'text-slate-400' : 'text-slate-500'
               }`}>
-                Orchestrating Intelligence
+                Production Ready v3.0
               </p>
             </div>
           </motion.div>
 
-          {/* Status & Theme Toggle */}
+          {/* Status & Controls */}
           <div className="flex items-center space-x-4">
             {/* System Health Status */}
             <motion.div 
@@ -120,6 +130,47 @@ const Header: React.FC<HeaderProps> = ({ theme, onToggleTheme, systemHealth }) =
               >
                 {systemHealth.config.models.llm} + {systemHealth.config.models.vision}
               </motion.div>
+            )}
+
+            {/* User Authentication */}
+            {user ? (
+              <div className="flex items-center space-x-2">
+                <div className={`flex items-center space-x-2 px-3 py-1 rounded-lg ${
+                  theme === 'dark' 
+                    ? 'bg-slate-700/50 text-slate-300' 
+                    : 'bg-slate-100 text-slate-600'
+                }`}>
+                  <User size={16} />
+                  <span className="text-sm">{user.metadata?.name || user.email}</span>
+                </div>
+                
+                <motion.button
+                  whileHover={{ scale: 1.05 }}
+                  whileTap={{ scale: 0.95 }}
+                  onClick={onLogout}
+                  className={`p-2 rounded-lg transition-all duration-200 ${
+                    theme === 'dark' 
+                      ? 'bg-slate-800/50 hover:bg-slate-700/50 text-red-400' 
+                      : 'bg-slate-100 hover:bg-slate-200 text-red-600'
+                  }`}
+                >
+                  <LogOut size={16} />
+                </motion.button>
+              </div>
+            ) : (
+              <motion.button
+                whileHover={{ scale: 1.05 }}
+                whileTap={{ scale: 0.95 }}
+                onClick={onLogin}
+                className={`flex items-center space-x-2 px-3 py-2 rounded-lg transition-all duration-200 ${
+                  theme === 'dark' 
+                    ? 'bg-blue-600 hover:bg-blue-700 text-white' 
+                    : 'bg-blue-500 hover:bg-blue-600 text-white'
+                }`}
+              >
+                <LogIn size={16} />
+                <span className="text-sm">Sign In</span>
+              </motion.button>
             )}
 
             {/* Theme Toggle */}

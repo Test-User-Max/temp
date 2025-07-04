@@ -39,3 +39,13 @@ openpyxl==3.1.2
 # Memory & Storage
 redis==5.0.1
 sqlalchemy==2.0.23
+
+# Authentication & Security
+PyJWT==2.8.0
+bcrypt==4.1.2
+passlib==1.7.4
+
+# Multilingual Support
+transformers[torch]==4.36.0
+sentencepiece==0.1.99
+sacremoses==0.1.1

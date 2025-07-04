@@ -6,8 +6,15 @@ import QueryInput from './components/QueryInput';
 import AgentProgress from './components/AgentProgress';
 import ResultDisplay from './components/ResultDisplay';
 import Footer from './components/Footer';
+import VoiceInput from './components/VoiceInput';
+import DeveloperPanel from './components/DeveloperPanel';
+import AuthModal from './components/AuthModal';
+import ConversationHistory from './components/ConversationHistory';
+import LanguageSelector from './components/LanguageSelector';
 import { useTheme } from './hooks/useTheme';
 import { useApi } from './hooks/useApi';
+import { useAuth } from './hooks/useAuth';
+import { useStreaming } from './hooks/useStreaming';
 import './App.css';
 
 interface Step {
@@ -42,6 +49,9 @@ interface QueryResult {
 function App() {
   const { theme, toggleTheme } = useTheme();
   const { submitQuery, getSessionStatus, loading, checkHealth, apiBaseUrl } = useApi();
+  const { user, login, register, logout, updatePreferences, isAuthenticated } = useAuth();
+  const { isStreaming, streamedContent, startStreaming, stopStreaming } = useStreaming();
+  
   const [result, setResult] = useState<QueryResult | null>(null);
   const [currentStep, setCurrentStep] = useState(0);
   const [steps, setSteps] = useState<Step[]>([]);
@@ -49,6 +59,14 @@ function App() {
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [polling, setPolling] = useState(false);
   const [systemHealth, setSystemHealth] = useState<any>(null);
+  
+  // New state for additional features
+  const [showAuthModal, setShowAuthModal] = useState(false);
+  const [showVoiceInput, setShowVoiceInput] = useState(false);
+  const [showDeveloperPanel, setShowDeveloperPanel] = useState(false);
+  const [showConversationHistory, setShowConversationHistory] = useState(false);
+  const [currentLanguage, setCurrentLanguage] = useState('en');
+  const [enableStreaming, setEnableStreaming] = useState(false);
 
   // Check system health on mount and periodically
   useEffect(() => {
@@ -64,6 +82,13 @@ function App() {
     
     return () => clearInterval(healthInterval);
   }, [checkHealth]);
+
+  // Update language when user preferences change
+  useEffect(() => {
+    if (user?.preferences?.language) {
+      setCurrentLanguage(user.preferences.language);
+    }
+  }, [user]);
 
   // Poll backend for agent progress
   useEffect(() => {
@@ -104,12 +129,50 @@ function App() {
       // Generate a session ID for tracking
       const newSessionId = `session_${Date.now()}`;
       setSessionId(newSessionId);
-      setPolling(true);
-      await submitQuery(query, enableTts, file);
+      
+      if (enableStreaming) {
+        // Start streaming
+        startStreaming(newSessionId);
+      } else {
+        setPolling(true);
+      }
+      
+      await submitQuery(query, enableTts, file, currentLanguage, enableStreaming);
     } catch (error) {
       setPolling(false);
+      stopStreaming();
       console.error('Query failed:', error);
     }
+  };
+
+  const handleVoiceRecording = (audioBlob: Blob) => {
+    // Convert blob to file and submit
+    const audioFile = new File([audioBlob], 'voice_input.webm', { type: 'audio/webm' });
+    handleQuerySubmit('Transcribe this audio', false, audioFile);
+    setShowVoiceInput(false);
+  };
+
+  const handleLanguageChange = async (language: string) => {
+    setCurrentLanguage(language);
+    
+    // Update user preferences if authenticated
+    if (isAuthenticated) {
+      try {
+        await updatePreferences({ language });
+      } catch (error) {
+        console.error('Failed to update language preference:', error);
+      }
+    }
+  };
+
+  const handleLogin = async (email: string, password: string) => {
+    await login(email, password);
+    setShowAuthModal(false);
+  };
+
+  const handleRegister = async (email: string, password: string, name: string) => {
+    await register(email, password, name);
+    setShowAuthModal(false);
   };
 
   useEffect(() => {
@@ -142,7 +205,14 @@ function App() {
         }}
       />
       
-      <Header theme={theme} onToggleTheme={toggleTheme} systemHealth={systemHealth} />
+      <Header 
+        theme={theme} 
+        onToggleTheme={toggleTheme} 
+        systemHealth={systemHealth}
+        user={user}
+        onLogin={() => setShowAuthModal(true)}
+        onLogout={logout}
+      />
       
       <main className="container mx-auto px-4 py-8 relative z-10">
         <motion.div
@@ -184,7 +254,10 @@ function App() {
               transition={{ duration: 0.8, delay: 0.6 }}
               className="flex flex-wrap justify-center gap-2 mb-8"
             >
-              {['Voice Input', 'Vision Analysis', 'Document Processing', 'LangGraph Orchestration', 'Local AI'].map((feature, index) => (
+              {[
+                'Real-time Streaming', 'Multi-User Auth', 'Multilingual Support', 
+                'Developer Debug', 'Plugin System', 'Voice I/O', 'Local AI'
+              ].map((feature, index) => (
                 <span
                   key={index}
                   className={`px-3 py-1 rounded-full text-sm ${
@@ -197,6 +270,59 @@ function App() {
                 </span>
               ))}
             </motion.div>
+
+            {/* User Status & Controls */}
+            <div className="flex flex-wrap justify-center items-center gap-4 mb-8">
+              {isAuthenticated && (
+                <motion.div
+                  initial={{ opacity: 0, scale: 0.95 }}
+                  animate={{ opacity: 1, scale: 1 }}
+                  className={`px-4 py-2 rounded-lg ${
+                    theme === 'dark' 
+                      ? 'bg-green-500/20 border border-green-500/30 text-green-400' 
+                      : 'bg-green-50 border border-green-200 text-green-700'
+                  }`}
+                >
+                  Welcome back, {user?.metadata?.name || user?.email}!
+                </motion.div>
+              )}
+              
+              <LanguageSelector
+                theme={theme}
+                currentLanguage={currentLanguage}
+                onLanguageChange={handleLanguageChange}
+              />
+              
+              <motion.button
+                whileHover={{ scale: 1.05 }}
+                whileTap={{ scale: 0.95 }}
+                onClick={() => setShowVoiceInput(!showVoiceInput)}
+                className={`px-4 py-2 rounded-lg transition-all duration-200 ${
+                  showVoiceInput
+                    ? 'bg-gradient-to-r from-green-500 to-emerald-500 text-white'
+                    : theme === 'dark'
+                      ? 'bg-slate-700/50 text-slate-300 hover:bg-slate-600/50'
+                      : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                }`}
+              >
+                🎤 Voice Input
+              </motion.button>
+              
+              <motion.button
+                whileHover={{ scale: 1.05 }}
+                whileTap={{ scale: 0.95 }}
+                onClick={() => setEnableStreaming(!enableStreaming)}
+                className={`px-4 py-2 rounded-lg transition-all duration-200 ${
+                  enableStreaming
+                    ? 'bg-gradient-to-r from-blue-500 to-purple-500 text-white'
+                    : theme === 'dark'
+                      ? 'bg-slate-700/50 text-slate-300 hover:bg-slate-600/50'
+                      : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                }`}
+              >
+                ⚡ Streaming
+              </motion.button>
+            </div>
 
             {/* Connection Status */}
             {systemHealth?.status === 'unhealthy' && (
@@ -217,17 +343,71 @@ function App() {
             )}
           </div>
 
+          {/* Voice Input */}
+          <AnimatePresence>
+            {showVoiceInput && (
+              <motion.div
+                initial={{ opacity: 0, y: 20 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -20 }}
+                transition={{ duration: 0.5 }}
+                className="mb-8"
+              >
+                <VoiceInput
+                  onRecordingComplete={handleVoiceRecording}
+                  theme={theme}
+                  disabled={systemHealth?.status === 'unhealthy'}
+                />
+              </motion.div>
+            )}
+          </AnimatePresence>
+
           {/* Query Input */}
           <QueryInput 
             onSubmit={handleQuerySubmit} 
-            loading={loading}
+            loading={loading || isStreaming}
             theme={theme}
             disabled={systemHealth?.status === 'unhealthy'}
           />
 
+          {/* Streaming Content */}
+          <AnimatePresence>
+            {isStreaming && streamedContent && (
+              <motion.div
+                initial={{ opacity: 0, y: 20 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -20 }}
+                transition={{ duration: 0.5 }}
+                className="mt-8"
+              >
+                <div className={`rounded-2xl p-6 backdrop-blur-md shadow-xl border ${
+                  theme === 'dark' 
+                    ? 'bg-slate-800/40 border-slate-700/50' 
+                    : 'bg-white/70 border-slate-200/50'
+                }`}>
+                  <h3 className={`text-xl font-semibold mb-4 ${
+                    theme === 'dark' ? 'text-white' : 'text-slate-900'
+                  }`}>
+                    Live Response Stream
+                  </h3>
+                  <div className={`p-4 rounded-lg ${
+                    theme === 'dark' ? 'bg-slate-700/30' : 'bg-slate-50/50'
+                  }`}>
+                    <p className={`leading-relaxed ${
+                      theme === 'dark' ? 'text-slate-300' : 'text-slate-700'
+                    }`}>
+                      {streamedContent}
+                      <span className="animate-pulse">|</span>
+                    </p>
+                  </div>
+                </div>
+              </motion.div>
+            )}
+          </AnimatePresence>
+
           {/* Agent Progress */}
           <AnimatePresence>
-            {loading && (
+            {(loading || isStreaming) && (
               <motion.div
                 initial={{ opacity: 0, y: 20 }}
                 animate={{ opacity: 1, y: 0 }}
@@ -263,6 +443,37 @@ function App() {
           </AnimatePresence>
         </motion.div>
       </main>
+
+      {/* Auth Modal */}
+      <AuthModal
+        isOpen={showAuthModal}
+        onClose={() => setShowAuthModal(false)}
+        onLogin={handleLogin}
+        onRegister={handleRegister}
+        theme={theme}
+      />
+
+      {/* Developer Panel */}
+      <DeveloperPanel
+        theme={theme}
+        sessionId={sessionId}
+        isVisible={showDeveloperPanel}
+        onToggle={() => setShowDeveloperPanel(!showDeveloperPanel)}
+      />
+
+      {/* Conversation History */}
+      {isAuthenticated && (
+        <ConversationHistory
+          theme={theme}
+          userId={user?.id || null}
+          isVisible={showConversationHistory}
+          onToggle={() => setShowConversationHistory(!showConversationHistory)}
+          onSelectConversation={(sessionId) => {
+            console.log('Selected conversation:', sessionId);
+            setShowConversationHistory(false);
+          }}
+        />
+      )}
 
       <Footer theme={theme} />
     </div>

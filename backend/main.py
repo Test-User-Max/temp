@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -12,7 +12,15 @@ import tempfile
 import shutil
 from datetime import datetime
 import logging
+
+# Import all the new modules
 from core.langgraph_mcp import LangGraphMCP
+from core.streaming import streaming_service
+from auth.supabase_auth import auth_service, get_current_user, get_optional_user
+from multilingual.language_service import multilingual_service
+from debug.developer_mode import developer_mode
+from plugins.plugin_loader import plugin_loader
+from enhanced_memory.redis_memory import enhanced_memory
 from config import Config
 
 # Configure logging
@@ -20,9 +28,9 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = FastAPI(
-    title="MCP-Driven Multi-Modal AI Assistant", 
-    version="2.0.0",
-    description="Advanced AI assistant with LangGraph orchestration and multi-modal capabilities"
+    title="Neurofluxion AI - Production Ready", 
+    version="3.0.0",
+    description="Complete production-ready AI assistant with streaming, auth, multilingual support, and developer tools"
 )
 
 # CORS middleware
@@ -47,42 +55,46 @@ for directory in [STATIC_DIR, AUDIO_DIR, UPLOAD_DIR]:
 config = Config()
 mcp = LangGraphMCP(config)
 
+# Load plugins on startup
+plugin_loader.load_all_plugins()
+
 # Pydantic models
 class QueryRequest(BaseModel):
     query: str
     enable_tts: Optional[bool] = False
     session_id: Optional[str] = None
+    language: Optional[str] = 'en'
+    enable_streaming: Optional[bool] = False
 
-class MultiModalQueryRequest(BaseModel):
-    query: str
-    enable_tts: Optional[bool] = False
-    session_id: Optional[str] = None
-    file_type: Optional[str] = None
+class AuthRequest(BaseModel):
+    email: str
+    password: str
+    metadata: Optional[Dict[str, Any]] = None
 
-class QueryResponse(BaseModel):
+class PreferencesRequest(BaseModel):
+    theme: Optional[str] = None
+    language: Optional[str] = None
+    tts_enabled: Optional[bool] = None
+    voice_speed: Optional[int] = None
+
+class DebugRequest(BaseModel):
     session_id: str
-    status: str
-    message: str
-    data: Optional[Dict[str, Any]] = None
-    steps: Optional[List] = None
-    timestamp: str
-
-class DocumentUploadRequest(BaseModel):
-    file_path: str
-    chunk_size: Optional[int] = 1000
-    overlap: Optional[int] = 200
+    enable: bool
 
 @app.get("/")
 async def root():
     return {
-        "message": "MCP-Driven Multi-Modal AI Assistant API",
-        "version": "2.0.0",
+        "message": "Neurofluxion AI - Production Ready",
+        "version": "3.0.0",
         "features": [
-            "LangGraph orchestration",
-            "Multi-modal input support",
-            "Vector store integration",
-            "Memory management",
-            "Quality control with critique agent"
+            "Real-time streaming output",
+            "User authentication & sessions",
+            "Multilingual support (12 languages)",
+            "Developer debug mode",
+            "Plugin system",
+            "Enhanced memory with Redis",
+            "Voice input/output",
+            "Multi-modal processing"
         ]
     }
 
@@ -105,7 +117,8 @@ async def health_check():
         
         # Get system stats
         vector_stats = mcp.get_vector_store_stats()
-        memory_stats = mcp.get_memory_stats()
+        memory_stats = enhanced_memory.get_memory_stats()
+        plugin_stats = plugin_loader.list_plugins()
         
         return {
             "status": "healthy",
@@ -113,6 +126,14 @@ async def health_check():
             "ollama_status": ollama_status,
             "vector_store": vector_stats,
             "memory": memory_stats,
+            "plugins": {
+                "loaded": len(plugin_stats),
+                "available": plugin_stats
+            },
+            "multilingual": {
+                "supported_languages": len(multilingual_service.get_supported_languages()),
+                "languages": list(multilingual_service.get_supported_languages().keys())
+            },
             "config": {
                 "tts_enabled": config.tts_enabled,
                 "stt_enabled": config.stt_enabled,
@@ -131,33 +152,109 @@ async def health_check():
             "timestamp": datetime.now().isoformat()
         }
 
-@app.post("/ask", response_model=QueryResponse)
-async def ask_question(request: QueryRequest):
-    """Process text query"""
+# Authentication endpoints
+@app.post("/auth/register")
+async def register(request: AuthRequest):
+    """Register new user"""
+    return await auth_service.register_user(request.email, request.password, request.metadata)
+
+@app.post("/auth/login")
+async def login(request: AuthRequest):
+    """Login user"""
+    return await auth_service.login_user(request.email, request.password)
+
+@app.get("/auth/me")
+async def get_me(current_user = Depends(get_current_user)):
+    """Get current user info"""
+    return {"user": current_user}
+
+@app.put("/auth/preferences")
+async def update_preferences(request: PreferencesRequest, current_user = Depends(get_current_user)):
+    """Update user preferences"""
+    preferences = request.dict(exclude_unset=True)
+    updated_prefs = await auth_service.update_user_preferences(current_user["email"], preferences)
+    return {"preferences": updated_prefs}
+
+# Streaming endpoints
+@app.get("/stream/{session_id}")
+async def stream_session(session_id: str, request: Request):
+    """Stream session progress and results"""
+    async def generate_stream():
+        async for update in streaming_service.stream_agent_progress(session_id, mcp):
+            yield update
+    
+    return await streaming_service.create_sse_response(session_id, generate_stream())
+
+@app.post("/ask")
+async def ask_question(request: QueryRequest, current_user = Depends(get_optional_user)):
+    """Process text query with optional streaming"""
     try:
-        logger.info(f"Received text query: {request.query}")
+        logger.info(f"Received query: {request.query}")
         
         # Generate session ID if not provided
         session_id = request.session_id or f"session_{int(time.time())}"
         
-        # Process query through LangGraph MCP
-        result = await mcp.process_query(
-            query=request.query,
-            session_id=session_id,
-            enable_tts=bool(request.enable_tts)
-        )
+        # Enable debug mode if user is authenticated
+        if current_user:
+            developer_mode.enable_debug(session_id)
+            # Store user context
+            enhanced_memory.set_user_memory(current_user["id"], "last_query", request.query)
         
-        return QueryResponse(
-            session_id=session_id,
-            status="success",
-            message="Query processed successfully",
-            data=result,
-            steps=result.get("steps", []),
-            timestamp=datetime.now().isoformat()
-        )
+        # Detect and translate if needed
+        detected_lang = multilingual_service.detect_language(request.query)
+        query_to_process = request.query
+        
+        if request.language != 'en' and detected_lang != request.language:
+            query_to_process = multilingual_service.translate_text(
+                request.query, 'en', detected_lang
+            )
+        
+        # Process query through LangGraph MCP
+        if request.enable_streaming:
+            # Return streaming response
+            async def generate_stream():
+                async for update in streaming_service.stream_llm_response(session_id, query_to_process, mcp.llm):
+                    yield update
+            
+            return await streaming_service.create_sse_response(session_id, generate_stream())
+        else:
+            # Regular processing
+            result = await mcp.process_query(
+                query=query_to_process,
+                session_id=session_id,
+                enable_tts=bool(request.enable_tts)
+            )
+            
+            # Translate result if needed
+            if request.language != 'en':
+                result["summary"] = multilingual_service.translate_text(
+                    result["summary"], request.language, 'en'
+                )
+            
+            # Store conversation if user is authenticated
+            if current_user:
+                enhanced_memory.add_conversation_history(
+                    current_user["id"], session_id, {
+                        "type": "query",
+                        "query": request.query,
+                        "result": result
+                    }
+                )
+            
+            return {
+                "session_id": session_id,
+                "status": "success",
+                "message": "Query processed successfully",
+                "data": result,
+                "language": request.language,
+                "detected_language": detected_lang,
+                "timestamp": datetime.now().isoformat()
+            }
         
     except Exception as e:
-        logger.error(f"Error processing text query: {str(e)}")
+        logger.error(f"Error processing query: {str(e)}")
+        if current_user:
+            developer_mode.log_error(session_id, "query_processing", str(e))
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/upload")
@@ -165,7 +262,9 @@ async def upload_file(
     file: UploadFile = File(...),
     query: str = Form(...),
     enable_tts: bool = Form(False),
-    session_id: Optional[str] = Form(None)
+    language: str = Form('en'),
+    session_id: Optional[str] = Form(None),
+    current_user = Depends(get_optional_user)
 ):
     """Upload and process file with query"""
     try:
@@ -177,6 +276,9 @@ async def upload_file(
         
         # Generate session ID if not provided
         session_id = session_id or f"session_{int(time.time())}"
+        
+        if current_user:
+            developer_mode.enable_debug(session_id)
         
         # Save uploaded file
         file_extension = os.path.splitext(file.filename)[1].lower()
@@ -194,31 +296,157 @@ async def upload_file(
             file_path=file_path
         )
         
+        # Translate result if needed
+        if language != 'en':
+            result["summary"] = multilingual_service.translate_text(
+                result["summary"], language, 'en'
+            )
+        
+        # Store conversation if user is authenticated
+        if current_user:
+            enhanced_memory.add_conversation_history(
+                current_user["id"], session_id, {
+                    "type": "file_upload",
+                    "filename": file.filename,
+                    "query": query,
+                    "result": result
+                }
+            )
+        
         # Clean up uploaded file after processing
         try:
             os.remove(file_path)
         except:
             pass
         
-        return QueryResponse(
-            session_id=session_id,
-            status="success",
-            message="File processed successfully",
-            data=result,
-            steps=result.get("steps", []),
-            timestamp=datetime.now().isoformat()
-        )
+        return {
+            "session_id": session_id,
+            "status": "success",
+            "message": "File processed successfully",
+            "data": result,
+            "language": language,
+            "timestamp": datetime.now().isoformat()
+        }
         
     except Exception as e:
         logger.error(f"Error processing file upload: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
+# Developer mode endpoints
+@app.post("/debug/toggle")
+async def toggle_debug(request: DebugRequest, current_user = Depends(get_current_user)):
+    """Toggle debug mode for session"""
+    if request.enable:
+        developer_mode.enable_debug(request.session_id)
+    else:
+        developer_mode.disable_debug(request.session_id)
+    
+    return {
+        "session_id": request.session_id,
+        "debug_enabled": request.enable,
+        "message": f"Debug mode {'enabled' if request.enable else 'disabled'}"
+    }
+
+@app.get("/debug/logs/{session_id}")
+async def get_debug_logs(session_id: str, log_type: Optional[str] = None, current_user = Depends(get_current_user)):
+    """Get debug logs for session"""
+    if log_type:
+        logs = developer_mode.get_filtered_logs(session_id, log_type=log_type)
+    else:
+        logs = developer_mode.get_session_logs(session_id)
+    
+    return {
+        "session_id": session_id,
+        "logs": logs,
+        "total_logs": len(logs)
+    }
+
+@app.get("/debug/performance/{session_id}")
+async def get_performance_metrics(session_id: str, current_user = Depends(get_current_user)):
+    """Get performance metrics for session"""
+    metrics = developer_mode.get_performance_metrics(session_id)
+    return {
+        "session_id": session_id,
+        "metrics": metrics
+    }
+
+# Plugin system endpoints
+@app.get("/plugins")
+async def list_plugins():
+    """List all available plugins"""
+    return {
+        "plugins": plugin_loader.list_plugins(),
+        "total_loaded": len(plugin_loader.loaded_plugins)
+    }
+
+@app.post("/plugins/reload")
+async def reload_plugins(current_user = Depends(get_current_user)):
+    """Reload all plugins"""
+    result = plugin_loader.load_all_plugins()
+    return {
+        "message": "Plugins reloaded",
+        "result": result
+    }
+
+# Multilingual endpoints
+@app.get("/languages")
+async def get_supported_languages():
+    """Get supported languages"""
+    return {
+        "languages": multilingual_service.get_supported_languages(),
+        "total_supported": len(multilingual_service.get_supported_languages())
+    }
+
+@app.post("/translate")
+async def translate_text(text: str, target_language: str, source_language: Optional[str] = None):
+    """Translate text"""
+    if not source_language:
+        source_language = multilingual_service.detect_language(text)
+    
+    translated = multilingual_service.translate_text(text, target_language, source_language)
+    
+    return {
+        "original_text": text,
+        "translated_text": translated,
+        "source_language": source_language,
+        "target_language": target_language
+    }
+
+# Memory and conversation endpoints
+@app.get("/conversations")
+async def get_conversations(current_user = Depends(get_current_user)):
+    """Get user's conversation sessions"""
+    sessions = enhanced_memory.get_user_sessions(current_user["id"])
+    return {
+        "sessions": sessions,
+        "total_sessions": len(sessions)
+    }
+
+@app.get("/conversations/{session_id}/history")
+async def get_conversation_history(session_id: str, limit: int = 10, current_user = Depends(get_current_user)):
+    """Get conversation history for session"""
+    history = enhanced_memory.get_conversation_history(current_user["id"], session_id, limit)
+    return {
+        "session_id": session_id,
+        "history": history,
+        "total_messages": len(history)
+    }
+
+# Existing endpoints (updated)
+@app.get("/status/{session_id}")
+async def get_status(session_id: str):
+    """Get session status"""
+    try:
+        status = await mcp.get_session_status(session_id)
+        return status
+    except Exception as e:
+        logger.error(f"Error getting status: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.post("/documents/add")
-async def add_document_to_vectorstore(request: DocumentUploadRequest):
+async def add_document_to_vectorstore(file_path: str, chunk_size: int = 1000, overlap: int = 200):
     """Add document to vector store for future retrieval"""
     try:
-        file_path = request.file_path
-        
         if not os.path.exists(file_path):
             raise HTTPException(status_code=404, detail="File not found")
         
@@ -235,11 +463,7 @@ async def add_document_to_vectorstore(request: DocumentUploadRequest):
             raise HTTPException(status_code=400, detail="Unsupported file format")
         
         # Chunk and add to vector store
-        chunks = DocumentProcessor.chunk_text(
-            content, 
-            chunk_size=request.chunk_size,
-            overlap=request.overlap
-        )
+        chunks = DocumentProcessor.chunk_text(content, chunk_size=chunk_size, overlap=overlap)
         
         doc_ids = mcp.vector_store.add_documents(chunks, [
             {
@@ -278,112 +502,89 @@ async def search_documents(query: str, limit: int = 5):
         logger.error(f"Error searching documents: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/status/{session_id}")
-async def get_status(session_id: str):
-    """Get session status"""
-    try:
-        status = await mcp.get_session_status(session_id)
-        return status
-    except Exception as e:
-        logger.error(f"Error getting status: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/sessions/{session_id}/history")
-async def get_session_history(session_id: str, limit: int = 10):
-    """Get conversation history for session"""
-    try:
-        history = mcp.memory_manager.get_conversation_history(session_id, limit)
-        return {
-            "session_id": session_id,
-            "history": history,
-            "total_messages": len(history)
-        }
-    except Exception as e:
-        logger.error(f"Error getting session history: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/sessions/{session_id}/context")
-async def set_session_context(session_id: str, context: Dict[str, Any]):
-    """Set context for session"""
-    try:
-        for key, value in context.items():
-            mcp.memory_manager.set_context(session_id, key, value)
-        
-        return {
-            "message": "Context updated successfully",
-            "session_id": session_id,
-            "context_keys": list(context.keys())
-        }
-    except Exception as e:
-        logger.error(f"Error setting session context: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
-
 @app.get("/agents")
 async def get_agents():
     """Get information about available agents"""
+    base_agents = [
+        {
+            "name": "Intent Agent",
+            "type": "classification",
+            "description": "Classifies user intent and extracts entities",
+            "capabilities": ["intent_classification", "entity_extraction"]
+        },
+        {
+            "name": "Research Agent",
+            "type": "research",
+            "description": "Conducts comprehensive research using local LLM",
+            "capabilities": ["research", "analysis", "fact_finding"]
+        },
+        {
+            "name": "Compare Agent",
+            "type": "comparison",
+            "description": "Compares entities and concepts",
+            "capabilities": ["comparison", "analysis", "evaluation"]
+        },
+        {
+            "name": "Summarizer Agent",
+            "type": "summarization",
+            "description": "Summarizes content and extracts key points",
+            "capabilities": ["summarization", "key_point_extraction"]
+        },
+        {
+            "name": "Retriever Agent",
+            "type": "retrieval",
+            "description": "Searches vector store for relevant information",
+            "capabilities": ["document_search", "context_retrieval"]
+        },
+        {
+            "name": "Vision Agent",
+            "type": "vision",
+            "description": "Analyzes images using LLaVA model",
+            "capabilities": ["image_analysis", "visual_understanding"]
+        },
+        {
+            "name": "OCR Agent",
+            "type": "ocr",
+            "description": "Extracts text from images",
+            "capabilities": ["text_extraction", "document_digitization"]
+        },
+        {
+            "name": "STT Agent",
+            "type": "speech",
+            "description": "Converts speech to text using Whisper",
+            "capabilities": ["speech_recognition", "audio_transcription"]
+        },
+        {
+            "name": "TTS Agent",
+            "type": "speech",
+            "description": "Converts text to speech",
+            "capabilities": ["text_to_speech", "audio_generation"]
+        },
+        {
+            "name": "Critique Agent",
+            "type": "quality_control",
+            "description": "Evaluates response quality and suggests improvements",
+            "capabilities": ["quality_assessment", "response_evaluation"]
+        }
+    ]
+    
+    # Add plugin agents
+    plugin_agents = [
+        {
+            "name": plugin["name"],
+            "type": "plugin",
+            "description": plugin["description"],
+            "capabilities": ["custom_processing"],
+            "version": plugin["version"],
+            "plugin": True
+        }
+        for plugin in plugin_loader.list_plugins()
+    ]
+    
     return {
-        "agents": [
-            {
-                "name": "Intent Agent",
-                "type": "classification",
-                "description": "Classifies user intent and extracts entities",
-                "capabilities": ["intent_classification", "entity_extraction"]
-            },
-            {
-                "name": "Research Agent",
-                "type": "research",
-                "description": "Conducts comprehensive research using local LLM",
-                "capabilities": ["research", "analysis", "fact_finding"]
-            },
-            {
-                "name": "Compare Agent",
-                "type": "comparison",
-                "description": "Compares entities and concepts",
-                "capabilities": ["comparison", "analysis", "evaluation"]
-            },
-            {
-                "name": "Summarizer Agent",
-                "type": "summarization",
-                "description": "Summarizes content and extracts key points",
-                "capabilities": ["summarization", "key_point_extraction"]
-            },
-            {
-                "name": "Retriever Agent",
-                "type": "retrieval",
-                "description": "Searches vector store for relevant information",
-                "capabilities": ["document_search", "context_retrieval"]
-            },
-            {
-                "name": "Vision Agent",
-                "type": "vision",
-                "description": "Analyzes images using LLaVA model",
-                "capabilities": ["image_analysis", "visual_understanding"]
-            },
-            {
-                "name": "OCR Agent",
-                "type": "ocr",
-                "description": "Extracts text from images",
-                "capabilities": ["text_extraction", "document_digitization"]
-            },
-            {
-                "name": "STT Agent",
-                "type": "speech",
-                "description": "Converts speech to text using Whisper",
-                "capabilities": ["speech_recognition", "audio_transcription"]
-            },
-            {
-                "name": "TTS Agent",
-                "type": "speech",
-                "description": "Converts text to speech",
-                "capabilities": ["text_to_speech", "audio_generation"]
-            },
-            {
-                "name": "Critique Agent",
-                "type": "quality_control",
-                "description": "Evaluates response quality and suggests improvements",
-                "capabilities": ["quality_assessment", "response_evaluation"]
-            }
-        ],
+        "base_agents": base_agents,
+        "plugin_agents": plugin_agents,
+        "total_agents": len(base_agents) + len(plugin_agents),
         "workflow": "LangGraph-based orchestration with conditional routing"
     }
 
@@ -392,12 +593,20 @@ async def get_system_stats():
     """Get comprehensive system statistics"""
     try:
         vector_stats = mcp.get_vector_store_stats()
-        memory_stats = mcp.get_memory_stats()
+        memory_stats = enhanced_memory.get_memory_stats()
+        plugin_stats = plugin_loader.list_plugins()
         
         return {
             "vector_store": vector_stats,
             "memory": memory_stats,
+            "plugins": {
+                "loaded": len(plugin_stats),
+                "available": plugin_stats
+            },
             "active_sessions": len(mcp.sessions),
+            "multilingual": {
+                "supported_languages": len(multilingual_service.get_supported_languages())
+            },
             "upload_directory": UPLOAD_DIR,
             "audio_directory": AUDIO_DIR
         }
@@ -411,6 +620,7 @@ async def cleanup_system():
     try:
         # Clean up old sessions
         mcp.memory_manager.cleanup_old_sessions(days=7)
+        enhanced_memory.cleanup_expired_data()
         
         # Clean up old uploaded files
         cleanup_count = 0

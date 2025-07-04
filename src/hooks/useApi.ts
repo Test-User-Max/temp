@@ -30,7 +30,13 @@ export const useApi = () => {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const submitQuery = async (query: string, enableTts: boolean = false, file?: File) => {
+  const submitQuery = async (
+    query: string, 
+    enableTts: boolean = false, 
+    file?: File, 
+    language: string = 'en',
+    enableStreaming: boolean = false
+  ) => {
     setLoading(true);
     setError(null);
 
@@ -43,6 +49,7 @@ export const useApi = () => {
         formData.append('file', file);
         formData.append('query', query);
         formData.append('enable_tts', enableTts.toString());
+        formData.append('language', language);
         formData.append('session_id', `session_${Date.now()}`);
 
         response = await axios.post(`${API_BASE_URL}/upload`, formData, {
@@ -56,6 +63,8 @@ export const useApi = () => {
         response = await axios.post(`${API_BASE_URL}/ask`, {
           query,
           enable_tts: enableTts,
+          language,
+          enable_streaming: enableStreaming,
           session_id: `session_${Date.now()}`
         }, {
           timeout: 60000, // 60 second timeout
@@ -120,7 +129,7 @@ export const useApi = () => {
 
   const getSessionHistory = async (sessionId: string, limit: number = 10) => {
     try {
-      const response = await axios.get(`${API_BASE_URL}/sessions/${sessionId}/history?limit=${limit}`, {
+      const response = await axios.get(`${API_BASE_URL}/conversations/${sessionId}/history?limit=${limit}`, {
         timeout: 10000,
       });
       return response.data;
@@ -182,6 +191,35 @@ export const useApi = () => {
     }
   };
 
+  const getSupportedLanguages = async () => {
+    try {
+      const response = await axios.get(`${API_BASE_URL}/languages`, {
+        timeout: 10000,
+      });
+      return response.data;
+    } catch (err) {
+      console.error('Languages fetch failed:', err);
+      return null;
+    }
+  };
+
+  const translateText = async (text: string, targetLanguage: string, sourceLanguage?: string) => {
+    try {
+      const response = await axios.post(`${API_BASE_URL}/translate`, null, {
+        params: {
+          text,
+          target_language: targetLanguage,
+          source_language: sourceLanguage
+        },
+        timeout: 15000,
+      });
+      return response.data;
+    } catch (err) {
+      console.error('Translation failed:', err);
+      return null;
+    }
+  };
+
   return {
     submitQuery,
     checkHealth,
@@ -191,6 +229,8 @@ export const useApi = () => {
     addDocument,
     getSystemStats,
     getAgents,
+    getSupportedLanguages,
+    translateText,
     loading,
     error,
     apiBaseUrl: API_BASE_URL
